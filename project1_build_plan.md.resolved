@@ -1,0 +1,574 @@
+# Project 1: Real-Time Financial Transaction Pipeline
+
+## What This Project Is
+
+An end-to-end data pipeline that ingests streaming financial transaction data through Apache Kafka, processes batches using PySpark DataFrames and RDDs on Hadoop HDFS, and loads clean data into a PostgreSQL data warehouse. It handles 500K+ simulated records with real-time batch ingestion, has automated validation so that bad records get flagged before reaching the warehouse, and includes SQL analytics with JOINs and window functions to generate daily settlement reports and catch transaction anomalies.
+
+**GitHub Repo Name:** `financial-data-pipeline`
+**Owner:** `Ch-Suharsha`
+**Tech Stack:** Python, Apache Kafka, PySpark, Hadoop (HDFS), PostgreSQL, Docker
+
+---
+
+## Step-by-Step Build Plan
+
+### Phase 1: Repository Setup
+
+#### Step 1.1 — Create the GitHub repo
+```bash
+# Create a new directory for the project
+mkdir financial-data-pipeline
+cd financial-data-pipeline
+
+# Initialize git
+git init
+
+# Create a GitHub repo (use GitHub CLI)
+gh repo create Ch-Suharsha/financial-data-pipeline --public --description "End-to-end real-time financial transaction data pipeline using Kafka, PySpark, Hadoop HDFS, and PostgreSQL" --source . --remote origin
+```
+
+#### Step 1.2 — Create the project structure
+```
+financial-data-pipeline/
+├── README.md
+├── docker-compose.yml
+├── requirements.txt
+├── .gitignore
+├── .env.example
+├── data_generator/
+│   ├── __init__.py
+│   └── transaction_generator.py
+├── kafka_producer/
+│   ├── __init__.py
+│   └── producer.py
+├── spark_processor/
+│   ├── __init__.py
+│   ├── batch_processor.py
+│   └── data_validator.py
+├── warehouse/
+│   ├── __init__.py
+│   ├── schema.sql
+│   └── loader.py
+├── analytics/
+│   ├── __init__.py
+│   └── settlement_reports.sql
+├── pipeline/
+│   ├── __init__.py
+│   └── orchestrator.py
+├── tests/
+│   ├── __init__.py
+│   ├── test_generator.py
+│   ├── test_validator.py
+│   └── test_pipeline.py
+└── config/
+    └── pipeline_config.yaml
+```
+
+Create ALL these directories and empty `__init__.py` files first.
+
+#### Step 1.3 — Create `.gitignore`
+```gitignore
+__pycache__/
+*.pyc
+.env
+*.egg-info/
+dist/
+build/
+.venv/
+venv/
+data/output/
+*.log
+.DS_Store
+```
+
+#### Step 1.4 — Create `requirements.txt`
+```
+pyspark==3.5.0
+kafka-python==2.0.2
+psycopg2-binary==2.9.9
+faker==22.0.0
+python-dotenv==1.0.0
+pyyaml==6.0.1
+pandas==2.1.4
+numpy==1.26.2
+```
+
+#### Step 1.5 — Create `.env.example`
+```
+KAFKA_BOOTSTRAP_SERVERS=localhost:9092
+KAFKA_TOPIC=financial_transactions
+POSTGRES_HOST=localhost
+POSTGRES_PORT=5432
+POSTGRES_DB=financial_warehouse
+POSTGRES_USER=pipeline_user
+POSTGRES_PASSWORD=pipeline_pass
+BATCH_SIZE=10000
+```
+
+---
+
+### Phase 2: Docker Infrastructure
+
+#### Step 2.1 — Create `docker-compose.yml`
+Set up containers for:
+- **Zookeeper** (required by Kafka)
+- **Kafka** (message broker for streaming ingestion)
+- **PostgreSQL** (data warehouse)
+
+```yaml
+version: '3.8'
+services:
+  zookeeper:
+    image: confluentinc/cp-zookeeper:7.5.0
+    environment:
+      ZOOKEEPER_CLIENT_PORT: 2181
+    ports:
+      - "2181:2181"
+
+  kafka:
+    image: confluentinc/cp-kafka:7.5.0
+    depends_on:
+      - zookeeper
+    ports:
+      - "9092:9092"
+    environment:
+      KAFKA_BROKER_ID: 1
+      KAFKA_ZOOKEEPER_CONNECT: zookeeper:2181
+      KAFKA_ADVERTISED_LISTENERS: PLAINTEXT://localhost:9092
+      KAFKA_OFFSETS_TOPIC_REPLICATION_FACTOR: 1
+
+  postgres:
+    image: postgres:15
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: financial_warehouse
+      POSTGRES_USER: pipeline_user
+      POSTGRES_PASSWORD: pipeline_pass
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./warehouse/schema.sql:/docker-entrypoint-initdb.d/schema.sql
+
+volumes:
+  postgres_data:
+```
+
+#### Step 2.2 — Test infrastructure
+```bash
+docker-compose up -d
+# Verify all 3 containers are running
+docker-compose ps
+```
+
+---
+
+### Phase 3: Data Generation (Simulated Financial Transactions)
+
+#### Step 3.1 — Create `config/pipeline_config.yaml`
+```yaml
+generator:
+  num_records: 500000
+  batch_size: 10000
+  transaction_types:
+    - WAGER_PLACEMENT
+    - WAGER_SETTLEMENT
+    - REFUND
+    - ACCOUNT_DEPOSIT
+    - ACCOUNT_WITHDRAWAL
+    - FEE_CHARGE
+  accounts_count: 50000
+  max_amount: 10000.00
+  min_amount: 1.00
+  anomaly_rate: 0.02  # 2% of transactions are anomalous
+
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic: "financial_transactions"
+  batch_size: 1000
+
+spark:
+  app_name: "FinancialTransactionProcessor"
+  master: "local[*]"
+  warehouse_path: "/tmp/spark-warehouse"
+
+postgres:
+  host: "localhost"
+  port: 5432
+  database: "financial_warehouse"
+  user: "pipeline_user"
+  password: "pipeline_pass"
+```
+
+#### Step 3.2 — Create `data_generator/transaction_generator.py`
+This file should generate realistic financial transaction records. Each transaction must have:
+
+```python
+# Fields for each transaction record:
+{
+    "transaction_id": "uuid4 string",
+    "account_id": "ACC_00001 to ACC_50000",
+    "transaction_type": "one of the 6 types from config",
+    "amount": "float between 1.00 and 10000.00",
+    "currency": "USD",
+    "timestamp": "ISO format datetime within last 30 days",
+    "merchant_id": "MER_0001 to MER_500",
+    "location": "random US city",
+    "status": "COMPLETED / PENDING / FAILED",
+    "is_flagged": "boolean — True for ~2% anomalous transactions"
+}
+```
+
+Implementation details:
+- Use `faker` library for realistic names/locations
+- Use `uuid4` for transaction IDs
+- Generate anomalous transactions (unusually high amounts, rapid successive transactions from same account, transactions at unusual hours) at the configured `anomaly_rate`
+- Function `generate_batch(batch_size)` returns a list of transaction dicts
+- Function `generate_all(num_records)` yields batches using a generator pattern
+- Add a `__main__` block that generates a sample of 100 records and prints them to verify
+
+---
+
+### Phase 4: Kafka Producer (Real-Time Ingestion)
+
+#### Step 4.1 — Create `kafka_producer/producer.py`
+This file sends generated transactions to Kafka topic:
+
+- Import `KafkaProducer` from `kafka-python`
+- Create a producer that serializes records as JSON
+- Function `send_transactions(transactions, topic)`:
+  - Sends each transaction to the Kafka topic
+  - Logs every 1000 records sent
+  - Handles errors with retry logic (max 3 retries)
+- Function `create_topic_if_not_exists(topic_name)`:
+  - Uses `KafkaAdminClient` to create the topic if it doesn't exist
+  - Set `num_partitions=3` and `replication_factor=1`
+- Add a `__main__` block that:
+  1. Creates the topic
+  2. Generates 10,000 test transactions
+  3. Sends them to Kafka
+  4. Prints a summary (records sent, time taken, records/second)
+
+---
+
+### Phase 5: Spark Processing (The Core Pipeline)
+
+#### Step 5.1 — Create `spark_processor/data_validator.py`
+Validation rules for incoming transaction data:
+
+- Function `validate_transaction(record)` returns `(is_valid: bool, errors: list)`:
+  - `transaction_id` must be non-null and valid UUID format
+  - `amount` must be positive and less than 100,000 (flag as suspicious otherwise)
+  - `account_id` must match pattern `ACC_XXXXX`
+  - `timestamp` must be valid ISO datetime and not in the future
+  - `transaction_type` must be one of the 6 valid types
+  - `currency` must be a valid 3-letter code
+- Function `validate_batch(records)` returns `(valid_records, invalid_records, validation_report)`:
+  - `validation_report` is a dict with counts: total, valid, invalid, error breakdown by type
+- Log all invalid records with their specific validation errors
+
+#### Step 5.2 — Create `spark_processor/batch_processor.py`
+This is the core PySpark processing engine:
+
+- Create `SparkSession` with app name from config
+- Function `read_from_kafka(spark, topic)`:
+  - Read batch data from Kafka using Spark's Kafka connector
+  - Parse JSON payloads into a structured DataFrame
+  - Define explicit schema using `StructType` with all transaction fields
+- Function `transform_transactions(df)`:
+  - Add derived columns:
+    - `transaction_date` (extracted from timestamp)
+    - `transaction_hour` (extracted from timestamp)
+    - `amount_bucket` (categorize: small <100, medium 100-1000, large >1000)
+    - `is_suspicious` (flag based on rules: amount >5000, or hour between 1-5 AM, or >5 transactions from same account in 1 minute)
+  - Use DataFrame API (NOT raw SQL) for transformations so that it demonstrates DataFrame and RDD knowledge
+  - Also include ONE example using RDD operations:
+    - Convert DataFrame to RDD
+    - Use `map()` to add a `risk_score` field (float 0-1 based on transaction characteristics)
+    - Convert back to DataFrame
+- Function `aggregate_daily_settlements(df)`:
+  - Group by `transaction_date`, `transaction_type`
+  - Calculate: total_amount, avg_amount, transaction_count, flagged_count
+  - Use window functions to calculate running totals and day-over-day change
+- Function `detect_anomalies(df)`:
+  - Use window functions partitioned by `account_id`, ordered by `timestamp`
+  - Flag accounts with >10 transactions in a 1-hour window
+  - Flag accounts with total daily amount >50,000
+  - Flag rapid successive transactions (<30 seconds apart from same account)
+- Function `process_batch(spark, input_path_or_kafka_topic, output_path)`:
+  - Orchestrates: read → validate → transform → aggregate → detect anomalies → write
+  - Write results to both HDFS (parquet) and PostgreSQL
+  - Log processing metrics (records processed, time taken, anomalies found)
+
+> [!IMPORTANT]
+> The Spark code MUST use both DataFrame API and RDD operations. Use DataFrames for most transformations and include at least one clear RDD example (map, filter, or reduce). This is critical because the resume says "DataFrames and RDDs."
+
+---
+
+### Phase 6: Data Warehouse (PostgreSQL)
+
+#### Step 6.1 — Create `warehouse/schema.sql`
+Design the warehouse schema with these tables:
+
+```sql
+-- Raw transactions (landing zone)
+CREATE TABLE IF NOT EXISTS raw_transactions (
+    transaction_id VARCHAR(36) PRIMARY KEY,
+    account_id VARCHAR(20) NOT NULL,
+    transaction_type VARCHAR(30) NOT NULL,
+    amount DECIMAL(12,2) NOT NULL,
+    currency VARCHAR(3) DEFAULT 'USD',
+    timestamp TIMESTAMP NOT NULL,
+    merchant_id VARCHAR(20),
+    location VARCHAR(100),
+    status VARCHAR(20),
+    is_flagged BOOLEAN DEFAULT FALSE,
+    loaded_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Cleaned and transformed transactions (processed zone)
+CREATE TABLE IF NOT EXISTS processed_transactions (
+    transaction_id VARCHAR(36) PRIMARY KEY,
+    account_id VARCHAR(20) NOT NULL,
+    transaction_type VARCHAR(30) NOT NULL,
+    amount DECIMAL(12,2) NOT NULL,
+    transaction_date DATE NOT NULL,
+    transaction_hour INTEGER,
+    amount_bucket VARCHAR(10),
+    is_suspicious BOOLEAN DEFAULT FALSE,
+    risk_score DECIMAL(3,2),
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Daily settlement aggregations
+CREATE TABLE IF NOT EXISTS daily_settlements (
+    settlement_date DATE NOT NULL,
+    transaction_type VARCHAR(30) NOT NULL,
+    total_amount DECIMAL(15,2),
+    avg_amount DECIMAL(12,2),
+    transaction_count INTEGER,
+    flagged_count INTEGER,
+    running_total DECIMAL(18,2),
+    day_over_day_change DECIMAL(8,2),
+    PRIMARY KEY (settlement_date, transaction_type)
+);
+
+-- Anomaly detection results
+CREATE TABLE IF NOT EXISTS anomaly_alerts (
+    alert_id SERIAL PRIMARY KEY,
+    account_id VARCHAR(20) NOT NULL,
+    alert_type VARCHAR(50) NOT NULL,
+    alert_description TEXT,
+    transaction_count INTEGER,
+    total_amount DECIMAL(12,2),
+    detection_time TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Data quality log
+CREATE TABLE IF NOT EXISTS data_quality_log (
+    log_id SERIAL PRIMARY KEY,
+    batch_id VARCHAR(36),
+    total_records INTEGER,
+    valid_records INTEGER,
+    invalid_records INTEGER,
+    error_breakdown JSONB,
+    processed_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+);
+
+-- Create indexes for query performance
+CREATE INDEX idx_processed_account ON processed_transactions(account_id);
+CREATE INDEX idx_processed_date ON processed_transactions(transaction_date);
+CREATE INDEX idx_settlements_date ON daily_settlements(settlement_date);
+CREATE INDEX idx_anomaly_account ON anomaly_alerts(account_id);
+```
+
+#### Step 6.2 — Create `warehouse/loader.py`
+- Function `load_to_postgres(df, table_name, connection_params)`:
+  - Uses `psycopg2` to bulk insert DataFrame rows into PostgreSQL
+  - Uses `COPY` command or batch `INSERT` for performance
+  - Handles duplicate key conflicts with `ON CONFLICT DO NOTHING`
+  - Returns count of records inserted
+- Function `get_connection(config)`:
+  - Returns a psycopg2 connection using config parameters
+- Includes error handling and connection pooling
+
+---
+
+### Phase 7: SQL Analytics
+
+#### Step 7.1 — Create `analytics/settlement_reports.sql`
+Write 4-5 analytical SQL queries that demonstrate JOINs, CTEs, and window functions:
+
+```sql
+-- Query 1: Daily Settlement Summary with Running Totals
+-- Uses window functions (SUM OVER, LAG)
+-- Shows total settlements per day with running cumulative total
+-- and day-over-day percentage change
+
+-- Query 2: Top 10 Accounts by Transaction Volume
+-- Uses JOINs between processed_transactions and anomaly_alerts
+-- Shows accounts with highest activity and whether they triggered alerts
+
+-- Query 3: Hourly Transaction Distribution with Anomaly Rate
+-- Uses CTEs to first calculate hourly stats, then anomaly rates
+-- Identifies high-risk hours
+
+-- Query 4: Merchant Risk Analysis
+-- Uses window functions (RANK, DENSE_RANK) to rank merchants
+-- by flagged transaction percentage
+-- JOINs with daily_settlements for context
+
+-- Query 5: Account Behavior Pattern Detection
+-- Uses CTEs and window functions (LAG, LEAD, ROW_NUMBER)
+-- to detect rapid successive transactions
+-- Identifies potentially fraudulent patterns
+```
+
+Write the FULL SQL for all 5 queries, not just comments. Each query should be 10-25 lines and use real column names from the schema.
+
+---
+
+### Phase 8: Pipeline Orchestrator
+
+#### Step 8.1 — Create `pipeline/orchestrator.py`
+Main script that runs the full pipeline end-to-end:
+
+```python
+# The orchestrator should:
+# 1. Load config from pipeline_config.yaml
+# 2. Check Docker services are running (Kafka, PostgreSQL)
+# 3. Generate transaction data (or read from existing source)
+# 4. Send data to Kafka
+# 5. Start Spark job to process from Kafka
+# 6. Validate data
+# 7. Transform and enrich
+# 8. Load into PostgreSQL warehouse
+# 9. Run anomaly detection
+# 10. Log data quality metrics
+# 11. Print final summary report
+```
+
+- Use Python's `logging` module throughout (not print statements)
+- Add timing for each step
+- Handle errors gracefully — if one step fails, log the error and continue where possible
+- Add a `--mode` flag: `full` (all steps) or `test` (100 records only)
+- Add a `--skip-kafka` flag for development (read from local JSON file instead)
+
+---
+
+### Phase 9: Tests
+
+#### Step 9.1 — Create `tests/test_generator.py`
+- Test that `generate_batch()` returns the correct number of records
+- Test that all required fields are present in each record
+- Test that anomaly rate is approximately correct (within 1% tolerance)
+- Test that amounts are within configured bounds
+
+#### Step 9.2 — Create `tests/test_validator.py`
+- Test that valid records pass validation
+- Test that records with null `transaction_id` fail
+- Test that records with negative amounts fail
+- Test that records with future timestamps fail
+- Test that validation report counts are accurate
+
+#### Step 9.3 — Create `tests/test_pipeline.py`
+- Integration test: generate 100 records → process through Spark → verify output schema
+- Test that transformed DataFrame has all expected derived columns
+- Test that anomaly detection flags the right patterns
+
+Run tests with:
+```bash
+python -m pytest tests/ -v
+```
+
+---
+
+### Phase 10: README
+
+#### Step 10.1 — Create `README.md`
+Write a comprehensive README with these sections:
+
+1. **Title and one-line description**
+2. **Architecture diagram** (use a Mermaid diagram showing data flow: Generator → Kafka → Spark → PostgreSQL)
+3. **Tech Stack** (list with brief explanation of why each tool)
+4. **Project Structure** (the directory tree)
+5. **Prerequisites** (Docker, Python 3.9+, Java 8+)
+6. **Quick Start** (step-by-step to run the pipeline)
+   ```bash
+   # Clone the repo
+   git clone https://github.com/Ch-Suharsha/financial-data-pipeline.git
+   cd financial-data-pipeline
+
+   # Start infrastructure
+   docker-compose up -d
+
+   # Install Python dependencies
+   pip install -r requirements.txt
+
+   # Run the pipeline (test mode — 100 records)
+   python -m pipeline.orchestrator --mode test
+
+   # Run the full pipeline (500K records)
+   python -m pipeline.orchestrator --mode full
+   ```
+7. **Pipeline Stages** (explain each stage briefly)
+8. **SQL Analytics Examples** (show 2-3 example queries and sample output)
+9. **Data Quality** (explain validation rules)
+10. **Sample Output** (show what the pipeline prints when it runs)
+
+> [!IMPORTANT]
+> The README should be written in Harsha's tone (professional blog mode, 5-6/10 formality). Use "I built this..." framing, "so that" purpose clauses, and simple verbs. No corporate buzzwords.
+
+---
+
+### Phase 11: Final Steps
+
+#### Step 11.1 — Run the full pipeline and verify
+```bash
+# Start Docker services
+docker-compose up -d
+
+# Run in test mode first
+python -m pipeline.orchestrator --mode test
+
+# Check PostgreSQL has data
+docker exec -it financial-data-pipeline-postgres-1 psql -U pipeline_user -d financial_warehouse -c "SELECT COUNT(*) FROM processed_transactions;"
+
+# Run tests
+python -m pytest tests/ -v
+
+# Run full pipeline
+python -m pipeline.orchestrator --mode full
+```
+
+#### Step 11.2 — Commit and push
+```bash
+git add .
+git commit -m "Complete real-time financial transaction pipeline — Kafka, PySpark, Hadoop, PostgreSQL"
+git push origin main
+```
+
+#### Step 11.3 — Verify the GitHub repo
+- Go to `https://github.com/Ch-Suharsha/financial-data-pipeline`
+- Confirm README displays correctly
+- Confirm all files are present
+- Confirm repo description is set
+
+---
+
+## Verification Checklist
+
+Before marking this project as done, verify:
+
+- [ ] `docker-compose up -d` starts all 3 services without errors
+- [ ] Data generator creates 500K+ realistic transaction records
+- [ ] Kafka producer sends records successfully
+- [ ] Spark processor reads from Kafka and processes data
+- [ ] DataFrames AND RDDs are both used in the Spark code
+- [ ] Data validation catches bad records and logs them
+- [ ] Transformed data loads into PostgreSQL correctly
+- [ ] All 5 SQL analytics queries run without errors
+- [ ] Anomaly detection flags suspicious patterns
+- [ ] `data_quality_log` table has entries
+- [ ] All tests pass (`python -m pytest tests/ -v`)
+- [ ] README is comprehensive and in Harsha's tone
+- [ ] Repo is public on GitHub with correct description

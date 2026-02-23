@@ -1,0 +1,8 @@
+pyspark==3.5.0
+kafka-python==2.0.2
+psycopg2-binary==2.9.9
+faker==22.0.0
+python-dotenv==1.0.0
+pyyaml==6.0.1
+pandas==2.1.4
+numpy==1.26.2

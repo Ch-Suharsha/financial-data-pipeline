@@ -1,0 +1,31 @@
+generator:
+  num_records: 500000
+  batch_size: 10000
+  transaction_types:
+    - WAGER_PLACEMENT
+    - WAGER_SETTLEMENT
+    - REFUND
+    - ACCOUNT_DEPOSIT
+    - ACCOUNT_WITHDRAWAL
+    - FEE_CHARGE
+  accounts_count: 50000
+  max_amount: 10000.00
+  min_amount: 1.00
+  anomaly_rate: 0.02  # 2% of transactions are anomalous
+
+kafka:
+  bootstrap_servers: "localhost:9092"
+  topic: "financial_transactions"
+  batch_size: 1000
+
+spark:
+  app_name: "FinancialTransactionProcessor"
+  master: "local[*]"
+  warehouse_path: "/tmp/spark-warehouse"
+
+postgres:
+  host: "localhost"
+  port: 5432
+  database: "financial_warehouse"
+  user: "pipeline_user"
+  password: "pipeline_pass"
